@@ -150,6 +150,9 @@ def generate_worker():
             print(combined_transcript)
             summary = generate_mcq(combined_transcript)
             print(f"\n--- Batch Summary ({len(audio_files)} files) ---\n{summary}")
+            with open("batch_summary.md", "a", encoding="utf-8") as f:
+                f.write(f"\n## Batch Summary ({len(audio_files)} files)\n")
+                f.write(summary + "\n")
         except Exception as e:
             print(f"Error generating MCQ: {e}")
         finally:
