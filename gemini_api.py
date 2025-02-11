@@ -4,7 +4,7 @@ with open('GEMINI.txt','r',encoding='utf-8') as f:
 GEMINI_API_KEY = ''.join(a).replace('\n','')
 GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
 
-def generate_mcq(section, head="Summarize the following section. "):
+def generate_mcq(section, head="Summarize the following section with a focus on testable material for exams and ward-based assessments. Include key clinical concepts, diagnostic criteria, pathophysiology, and management principles."):
     payload = {
         "contents": [{"parts": [{"text": head + section}]}]
     }

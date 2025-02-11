@@ -2,14 +2,15 @@ import time
 import threading
 from queue import Queue
 from record_audio import record_audio
-print('importing whisper...')
-import whisper
-print('whisper importing success!')
-model = whisper.load_model("turbo") 
+#print('importing whisper...')
+#import whisper
+#print('whisper importing success!')
+#model = whisper.load_model("turbo") 
+from whisper_transcribe import transcribe_audio
 print('model loading complete! Service ready')
-def transcribe_audio(audio_file): # Change model size as needed: tiny, base, small, medium, large
-    result = model.transcribe(audio_file)
-    return result["text"]
+#def transcribe_audio(audio_file): # Change model size as needed: tiny, base, small, medium, large
+#    result = model.transcribe(audio_file)
+#    return result["text"]
 from gemini_api import generate_mcq
 import logging
 from queue import Empty
@@ -65,30 +66,27 @@ def transcribe_worker():
             audio_queue.task_done()
 
 
-def record_audio_loop_produce(max_duration=30):
-    """Record until either `max_duration` passes or user indicates stop."""
-    start_time = time.time()
+def record_audio_loop_produce(stop_event):
+    """Record continuously until the stop_event is set."""
     buffer_index = 0
 
-    while True:
-        elapsed = time.time() - start_time
-        if elapsed >= max_duration:
-            print("Reached max recording duration. Stopping recording.")
-            break
-        
-        # Alternatively, you can also check a global or threading.Event to allow user to press Enter to stop
-        # e.g. if user_stop_event.is_set(): break
-
+    while not stop_event.is_set():
         audio_file = f"audio_{buffer_index}_{int(time.time())}.wav"
         try:
-            record_audio(audio_file, duration=3)  # or however long each chunk is
+            # Record an audio chunk (e.g., 30 seconds per chunk)
+            record_audio(audio_file, duration=30)
             audio_queue.put(audio_file)
             buffer_index += 1
         except Exception as e:
             print(f"Recording failed: {e}")
             time.sleep(1)
     
-    print("Recording thread exiting. No more audio will be produced.")
+    print("Stop event detected. Recording thread exiting. No more audio will be produced.")
+
+def wait_for_stop(stop_event):
+    """Wait for the user to press Enter to signal a stop."""
+    input("Press Enter to stop recording...\n")
+    stop_event.set()
     # Here we do NOT put None into audio_queue yet if we want the pipeline to keep processing
     # We'll put None only when we do a final shutdown.
 '''
@@ -162,57 +160,67 @@ def generate_worker():
             batch_queue.task_done()
 
 def start_pipeline():
-    # 初始化线程池
+    # Initialize the stop event for recording control.
+    stop_event = threading.Event()
+
+    # Initialize threads for transcription, batch processing, and generation (as before)
     transcribe_threads = []
     for _ in range(TRANSCRIBE_WORKERS):
         t = threading.Thread(target=transcribe_worker, daemon=True)
         t.start()
         transcribe_threads.append(t)
 
-    # 启动批次处理线程
     batch_thread = threading.Thread(target=batch_worker, daemon=True)
     batch_thread.start()
 
-    # 启动生成线程池
     generate_threads = []
     for _ in range(GENERATE_WORKERS):
         t = threading.Thread(target=generate_worker, daemon=True)
         t.start()
         generate_threads.append(t)
 
-    # 启动模拟录音线程
+    # Start the recording thread with the stop_event
     record_thread = threading.Thread(
         target=record_audio_loop_produce, 
-        args=(30,),  # e.g. 1.5 hours = 5400 seconds
+        args=(stop_event,),  # pass the event so the recorder can check it
         daemon=False  
     )
     record_thread.start()
-    return record_thread, transcribe_threads, batch_thread, generate_threads
-    
+
+    # Start a separate thread that waits for user input to stop recording.
+    stop_thread = threading.Thread(target=wait_for_stop, args=(stop_event,), daemon=True)
+    stop_thread.start()
+
+    return record_thread, transcribe_threads, batch_thread, generate_threads, stop_thread
+
 def main():
-    record_thread, transcribe_threads, batch_thread, generate_threads = start_pipeline()
+    # Start the pipeline; now we also get the stop_thread
+    record_thread, transcribe_threads, batch_thread, generate_threads, stop_thread = start_pipeline()
 
-    # Wait for the recording thread to finish (it will finish after max_duration or user stops)
+    # Wait for the recording thread to finish.
+    # It will stop when the user presses Enter (via stop_thread) or when a max duration is reached.
     record_thread.join()
-    print("Recording has stopped. Now let's wait for the queue to empty or do a final shutdown...")
 
-    # If you want to keep the pipeline running until all current items are processed:
-    # 1) Wait until the audio_queue is empty:
+    # Optionally, join the stop thread if it hasn't finished yet.
+    stop_thread.join()
+
+    print("Recording has stopped. Now let's wait for the queues to empty and shut down the pipeline gracefully...")
+
+    # 1) Wait until the audio_queue is empty (i.e., all recorded audio chunks are processed)
     audio_queue.join()
-    
-    # 2) Now tell transcribers no more new audio
+
+    # 2) Signal the transcription workers that no more audio will come by sending None for each worker.
     for _ in range(TRANSCRIBE_WORKERS):
         audio_queue.put(None)
     for t in transcribe_threads:
         t.join()
-    
-    # 3) Wait until transcripts are fully processed
+
+    # 3) Wait for the transcript_queue to empty, then signal the batch worker to finish.
     transcript_queue.join()
-    # Then push None so batch_worker can flush or finish
     transcript_queue.put(None)
     batch_thread.join()
-    
-    # 4) Wait until all batches are generated
+
+    # 4) Finally, wait for the batch_queue to empty and signal the generation workers to stop.
     batch_queue.join()
     for _ in range(GENERATE_WORKERS):
         batch_queue.put(None)
